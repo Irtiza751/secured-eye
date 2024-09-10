@@ -1,89 +1,76 @@
+######## video issue resolved ########
+
+from ultralytics import YOLO
+import supervision as sv
+import time
 import cv2
 import numpy as np
-import tensorflow as tf
+from skimage.metrics import structural_similarity as ssim
+from PIL import Image
+import os
+from collections import deque
+import subprocess
 
-# Load pre-trained object detection model (e.g., YOLO, SSD)
-def load_object_detection_model():
-    # Example: Load YOLO model
-    net = cv2.dnn.readNet("yolov3.weights", "yolov3.cfg")
-    layer_names = net.getLayerNames()
-    output_layers = [layer_names[i[0] - 1] for i in net.getUnconnectedOutLayers()]
-    return net, output_layers
+detection_count = {}
 
-# Process video to detect objects
-def detect_objects(net, output_layers, frame):
-    height, width, channels = frame.shape
-    blob = cv2.dnn.blobFromImage(frame, 0.00392, (416, 416), (0, 0, 0), True, crop=False)
-    net.setInput(blob)
-    outs = net.forward(output_layers)
-    
-    # Extract object information
-    class_ids, confidences, boxes = [], [], []
-    for out in outs:
-        for detection in out:
-            scores = detection[5:]
-            class_id = np.argmax(scores)
-            confidence = scores[class_id]
-            if confidence > 0.5:
-                center_x, center_y = int(detection[0] * width), int(detection[1] * height)
-                w, h = int(detection[2] * width), int(detection[3] * height)
-                x, y = center_x - w // 2, center_y - h // 2
-                boxes.append([x, y, w, h])
-                confidences.append(float(confidence))
-                class_ids.append(class_id)
-    return class_ids, confidences, boxes
+def load_model_and_data():
+    model = YOLO("14-JUN-best-2.pt")
+    CLASS_NAMES_DICT = {0: 'Normal', 1: 'Shoplifting'}
+    box_annotator = sv.BoxAnnotator()
+    return model, CLASS_NAMES_DICT, box_annotator
 
-# Load action recognition model
-def load_action_recognition_model():
-    # Example: Load a pre-trained model (like a CNN-LSTM model)
-    model = tf.keras.models.load_model('action_recognition_model.h5')
-    return model
+def save_frames_as_video(frames, save_path, frame_rate):
+    # Get the frame size from the first frame
+    print(frames)
+    height, width, _ = frames[0].shape
+    fourcc = cv2.VideoWriter_fourcc(*'h264')  # H.264 codec
+    video_writer = cv2.VideoWriter(save_path, fourcc, frame_rate, (width, height))
 
-# Recognize actions from video frames
-def recognize_action(model, video_frames):
-    # Preprocess video frames
-    video_frames = preprocess_frames(video_frames)
-    
-    # Predict actions
-    predictions = model.predict(video_frames)
-    
-    # Interpret predictions (define your threshold for shoplifting)
-    is_shoplifting = np.argmax(predictions) == 1  # Assuming label '1' is for shoplifting
-    return is_shoplifting
+    for frame in frames:
+        video_writer.write(frame)
 
-# Main function to process video
-def process_video(video_path):
-    net, output_layers = load_object_detection_model()
-    action_model = load_action_recognition_model()
-    
-    cap = cv2.VideoCapture(video_path)
-    while cap.isOpened():
-        ret, frame = cap.read()
-        if not ret:
-            break
-        
-        # Detect objects in the frame
-        class_ids, confidences, boxes = detect_objects(net, output_layers, frame)
-        
-        # Recognize actions (you will need to define how you extract and feed video frames to your action model)
-        is_shoplifting = recognize_action(action_model, frame)
-        
-        if is_shoplifting:
-            print("Shoplifting detected!")
-            # You can add further processing here, like sending alerts
-        
-        # Display frame (optional)
-        cv2.imshow('Video', frame)
-        if cv2.waitKey(1) & 0xFF == ord('q'):
-            break
-    
-    cap.release()
-    cv2.destroyAllWindows()
+    video_writer.release()
+    # clip = ImageSequenceClip(frames, fps=frame_rate)
+    # clip.write_videofile("output_video.mp4", codec="h264")
 
-# Helper function to preprocess frames (implement as needed)
-def preprocess_frames(frames):
-    # Perform any necessary preprocessing (e.g., resizing, normalizing)
-    return frames
+def process_frame(frame, detections, box_annotator, class_names_dict, camera_id):
+    global detection_count
 
-# Run the shoplifting detection on a sample video
-process_video("path/to/video.mp4")
+    if camera_id not in detection_count:
+        detection_count[camera_id] =0
+
+
+    if any(item[3] == 1 for item in detections):
+        if detection_count[camera_id]==0:
+            detection_count[camera_id] +=1
+            labels = [f"{class_names_dict[class_id]} {confidence:.2f}"
+                    for _, _, confidence, class_id, _, _ in detections]
+                
+            annotated_frame = box_annotator.annotate(frame, detections, labels)
+            current_time = time.time()
+            cv2.imwrite(f"images/{current_time}.jpg", annotated_frame)
+            print(f"Image saved: {current_time}")
+
+def main():
+    file_path = 'sources.streams'
+    with open(file_path, 'r') as file:
+        streams = file.read()
+    lines = streams.splitlines()
+    number_of_lines = len(lines)
+    print("length =", number_of_lines)
+    model, class_names_dict, box_annotator = load_model_and_data()
+    source = "20240904161220.mp4"
+    count = 1
+    results = model(source, stream=True, classes=[0, 1], conf=0.5, imgsz=640, show=True, half=True)
+
+    for result in results:
+            detections = sv.Detections.from_ultralytics(result)
+            #print(f"Result frame {count}: {len(result)} detections")
+            frame = result.orig_img
+            process_frame(frame, detections, box_annotator, class_names_dict, count)
+            count += 1
+            if count == int(number_of_lines) + 1:
+                count = 1
+
+if __name__ == "__main__":
+    main()
